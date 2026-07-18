@@ -21,6 +21,12 @@
 			}
 		]
 	},
+  // FIREFLY_III_PAT is a secret: wrangler secret put FIREFLY_III_PAT
+  "vars": {
+    "FIREFLY_III_BASE_URL": "https://fin.bohar.online",
+    // Default preset tags + budgets/available_budgets so budget tools are exposed
+    "FIREFLY_III_TOOLS": "accounts,bills,categories,tags,transactions,search,summary,budgets,available_budgets"
+  },
   // "compatibility_flags": [
   //   "nodejs_compat"
   // ],
