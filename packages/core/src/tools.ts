@@ -6701,7 +6701,10 @@ export const generatedTools: McpToolDefinition[] = [
           "type": "object",
           "required": [
             "name",
-            "target_amount"
+            "target_amount",
+            "accounts",
+            "start_date",
+            "transaction_currency_code"
           ],
           "properties": {
             "name": {
@@ -6713,14 +6716,13 @@ export const generatedTools: McpToolDefinition[] = [
               "items": {
                 "type": "object",
                 "required": [
-                  "id"
+                  "account_id"
                 ],
                 "properties": {
-                  "id": {
+                  "account_id": {
                     "type": "string",
                     "example": "3",
-                    "nullable": true,
-                    "description": "The ID of the account."
+                    "description": "The ID of the asset account to link."
                   },
                   "name": {
                     "type": "string",
@@ -6740,6 +6742,16 @@ export const generatedTools: McpToolDefinition[] = [
               "type": "string",
               "example": "123.45",
               "nullable": true
+            },
+            "transaction_currency_id": {
+              "type": "string",
+              "example": "42",
+              "description": "Currency ID. Either this or transaction_currency_code is required."
+            },
+            "transaction_currency_code": {
+              "type": "string",
+              "example": "LKR",
+              "description": "Currency code, e.g. LKR. Either this or transaction_currency_id is required."
             },
             "current_amount": {
               "type": "string",
@@ -6851,14 +6863,13 @@ export const generatedTools: McpToolDefinition[] = [
               "items": {
                 "type": "object",
                 "required": [
-                  "id"
+                  "account_id"
                 ],
                 "properties": {
-                  "id": {
+                  "account_id": {
                     "type": "string",
                     "example": "3",
-                    "nullable": true,
-                    "description": "The ID of the account."
+                    "description": "The ID of the asset account to link."
                   },
                   "name": {
                     "type": "string",
