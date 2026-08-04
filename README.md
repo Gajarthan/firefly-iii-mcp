@@ -2,6 +2,13 @@
 
 This is a Model Context Protocol (MCP) server for Firefly III, a free and open-source personal finance manager. Through this MCP server, users can leverage AI tools to manage their Firefly III accounts and transactions, creating AI assistants for personal finance and accounting.
 
+> **This fork's actual deployment** (`packages/cloudflare-worker`, live at `firefly-iii-mcp.thisanthan02.workers.dev`)
+> has diverged from the description below in ways that matter for security: login is delegated to Firefly III's
+> own OAuth server rather than a static Personal Access Token, and tool exposure is gated by risk-tiered presets
+> (safe/advanced/administrative) rather than the tag-based presets this README still documents. See
+> [`SECURITY.md`](./SECURITY.md) for what's actually true of this deployment. `packages/server` and
+> `packages/local` are unsupported for this deployment - see the status notice at the top of each package's README.
+
 *[查看中文版](README_ZH.md)*
 
 ## Project Structure

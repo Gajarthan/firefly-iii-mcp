@@ -20,7 +20,8 @@
     "prepublishOnly": "npm run build",
     "dev": "tsc --watch",
     "lint": "eslint src/**/*.ts",
-    "test": "echo \"No tests specified\" && exit 0"
+    "test": "echo \"No tests specified\" && exit 0",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@firefly-iii-mcp/core": "1.4.0",

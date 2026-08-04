@@ -1,5 +1,13 @@
 # Firefly III MCP Server - Local
 
+> **Status: unsupported deployment target for this fork.** The `firefly-iii-mcp.thisanthan02.workers.dev` deployment
+> this repository maintains runs `packages/cloudflare-worker` exclusively - delegated Firefly III OAuth login,
+> per-account isolation, tool-risk presets, structured logging, and the automated test suite all live there and
+> nowhere else. This package still builds and typechecks (see the root CI workflow), but has no tests of its own
+> and is not exercised by any deployment. It also predates the tool-risk preset work: run via this CLI, a caller
+> gets whichever tags `enableToolTags`/`FIREFLY_III_PRESET` resolve to, not the safe/advanced/administrative
+> gating `cloudflare-worker` enforces. Treat it as inherited-but-dormant code, not production-hardened.
+
 This package provides a command-line tool for running the Firefly III MCP (Model Context Protocol) server locally. The MCP server integrates with Firefly III, a free and open-source personal finance manager.
 
 *[查看中文版](README_ZH.md)*

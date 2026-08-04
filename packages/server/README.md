@@ -1,5 +1,13 @@
 # Firefly III MCP Server - Express
 
+> **Status: unsupported deployment target for this fork.** The `firefly-iii-mcp.thisanthan02.workers.dev` deployment
+> this repository maintains runs `packages/cloudflare-worker` exclusively - delegated Firefly III OAuth login,
+> per-account isolation, tool-risk presets, structured logging, and the automated test suite all live there and
+> nowhere else. This package still builds and typechecks (see the root CI workflow), but has no tests of its own
+> and is not exercised by any deployment. Treat it as inherited-but-dormant code: safe to read/reference, not
+> safe to assume production-hardened. If you want to actually run this Express server, budget time to add test
+> coverage and carry the OAuth/preset/logging work from `cloudflare-worker` over to it first.
+
 This package provides an Express-based server implementation of the Firefly III MCP (Model Context Protocol) server. It supports Streamable HTTP and Server-Sent Events (SSE), making it ideal for integrating Firefly III with AI tools through a robust web server.
 
 *[查看中文版](README_ZH.md)*
