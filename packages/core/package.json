@@ -13,12 +13,14 @@
   ],
   "scripts": {
     "toolgen": "npx tsx scripts/generate-tools.ts",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "clean": "rimraf dist",
-    "prebuild": "npm run clean && npm run toolgen",
+    "prebuild": "npm run clean",
     "prepublishOnly": "npm run build",
     "lint": "eslint src/**/*.ts",
-    "test": "echo \"No tests specified\" && exit 0"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "toolriskgen": "npx tsx scripts/generate-tool-risk.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",

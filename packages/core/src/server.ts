@@ -11,6 +11,8 @@ import { generatedTools } from "./tools.js";
 import { Schema, Validator } from "@cfworker/json-schema";
 import { openapiSchemaToJsonSchema } from "@openapi-contrib/openapi-schema-to-json-schema";
 import { DEFAULT_PRESET_TAGS } from "./presets.js";
+import { resolveEnabledToolNames } from "./tool-risk.js";
+import { makeMcpError, upstreamError, McpErrorPayload } from "./errors.js";
 
 /**
  * Build the JSON Schema describing a tool's result.
@@ -78,7 +80,42 @@ export const buildOutputSchema = (definition: McpToolDefinition): { type: 'objec
   };
 };
 
+const errorResult = (error: McpErrorPayload): CallToolResult => ({
+  isError: true,
+  content: [{ type: 'text', text: JSON.stringify(error, null, 2) }],
+});
+
+const extractErrorCode = (result: CallToolResult): string | undefined => {
+  try {
+    const first = result.content?.[0];
+    const text = first && first.type === 'text' ? (first as { text: string }).text : undefined;
+    if (!text) return undefined;
+    const parsed = JSON.parse(text) as { code?: unknown };
+    return typeof parsed.code === 'string' ? parsed.code : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 export const executeApiTool = async (
+  toolName: string,
+  definition: McpToolDefinition,
+  toolArgs: CallToolRequestArguments,
+  serverConfig: McpServerConfig,
+): Promise<CallToolResult> => {
+  const startedAt = Date.now();
+  const result = await executeApiToolInner(toolName, definition, toolArgs, serverConfig);
+  serverConfig.logger?.({
+    stage: 'tool_invocation',
+    toolName,
+    durationMs: Date.now() - startedAt,
+    result: result.isError ? 'failure' : 'success',
+    errorCode: result.isError ? extractErrorCode(result) : undefined,
+  });
+  return result;
+};
+
+const executeApiToolInner = async (
   toolName: string,
   definition: McpToolDefinition,
   toolArgs: CallToolRequestArguments,
@@ -94,27 +131,11 @@ export const executeApiTool = async (
     if (validatedResult.valid) {
       validatedArgs = argsToParse;
     } else {
-      const errors = validatedResult.errors;
-      return {
-        isError: true,
-        content: [{
-          type: 'text', text: JSON.stringify({
-            message: `Invalid arguments for tool '${toolName}'`,
-            errors: errors,
-          }, null, 2)
-        }]
-      };
+      const summary = validatedResult.errors.map((e) => `${e.instanceLocation || '(root)'}: ${e.error}`).join('; ');
+      return errorResult(makeMcpError('INVALID_TOOL_INPUT', `Invalid arguments for tool '${toolName}': ${summary}`));
     }
-  } catch (error: unknown) {
-    return {
-      isError: true,
-      content: [{
-        type: 'text', text: JSON.stringify({
-          message: `Error validating arguments for tool '${toolName}'`,
-          error: error,
-        }, null, 2)
-      }]
-    }
+  } catch {
+    return errorResult(makeMcpError('INVALID_TOOL_INPUT', `Error validating arguments for tool '${toolName}'`));
   }
 
   // Prepare URL, query parameters, headers, and request body
@@ -139,9 +160,13 @@ export const executeApiTool = async (
     }
   });
 
-  // Ensure all path parameters are resolved
+  // Ensure all path parameters are resolved. This indicates a bug in the
+  // generated tool definition (a param the spec declared but we never
+  // received an execution mapping for), not a caller-input problem - still
+  // must not throw uncaught, or the raw JS error/stack reaches the MCP
+  // client via the SDK's default error handling.
   if (urlPath.includes('{')) {
-    throw new Error(`Failed to resolve path parameters: ${urlPath}`);
+    return errorResult(makeMcpError('INTERNAL_ERROR', `Tool '${toolName}' has an unresolved path parameter.`));
   }
 
   // Handle request body if needed
@@ -161,29 +186,46 @@ export const executeApiTool = async (
   const requestUrl = queryParams ? `${requestEndpoint}?${new URLSearchParams(queryParams).toString()}` : requestEndpoint;
   const requestMethod = definition.method.toUpperCase();
 
-  // Log request info to stderr (doesn't affect MCP output)
+  // Log request info to stderr (doesn't affect MCP output). Path/method only
+  // - never headers (carries the bearer token) or the request body.
   console.debug(`Executing tool "${toolName}": ${requestMethod} ${requestEndpoint}`);
 
-  const response = await fetch(requestUrl, {
-    method: definition.method.toUpperCase(),
-    headers: headers,
-    body: requestBodyData ? JSON.stringify(requestBodyData) : undefined,
-  });
+  const upstreamStartedAt = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(requestUrl, {
+      method: definition.method.toUpperCase(),
+      headers: headers,
+      body: requestBodyData ? JSON.stringify(requestBodyData) : undefined,
+    });
+  } catch {
+    serverConfig.logger?.({
+      stage: 'firefly_api_response', toolName, durationMs: Date.now() - upstreamStartedAt,
+      result: 'failure', errorCode: 'UPSTREAM_UNAVAILABLE',
+    });
+    // Network failure reaching Firefly III itself (DNS, TLS, connection
+    // refused) - not an HTTP error response, so classifyUpstreamStatus
+    // doesn't apply; treated the same as upstream being down.
+    return errorResult(makeMcpError('UPSTREAM_UNAVAILABLE', 'Could not reach Firefly III.'));
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
+    const mapped = upstreamError(response.status, errorText);
+    serverConfig.logger?.({
+      stage: 'firefly_api_response', toolName, durationMs: Date.now() - upstreamStartedAt,
+      upstreamStatus: response.status, result: 'failure', errorCode: mapped.code,
+    });
+    console.debug(`Tool "${toolName}" upstream error: ${response.status}`);
     // isError marks this as a failed call, which also exempts it from
     // outputSchema validation - error payloads do not match the success shape.
-    return {
-      isError: true,
-      content: [{
-        type: 'text', text: JSON.stringify({
-          message: `Error executing tool '${toolName}': ${response.status} ${response.statusText}`,
-          error: errorText,
-        }, null, 2)
-      }]
-    }
+    return errorResult(mapped);
   }
+
+  serverConfig.logger?.({
+    stage: 'firefly_api_response', toolName, durationMs: Date.now() - upstreamStartedAt,
+    upstreamStatus: response.status, result: 'success',
+  });
 
   const responseType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
 
@@ -224,16 +266,33 @@ export const executeApiTool = async (
   }
 
   // Default to text response for unsupported types
-  return {
-    isError: true,
-    content: [{
-      type: 'text', text: JSON.stringify({
-        error: `Unsupported response type: ${responseType}`,
-        message: `Unsupported response type: ${responseType}`,
-      }, null, 2)
-    }]
-  }
+  return errorResult(makeMcpError('INTERNAL_ERROR', `Unsupported response type from Firefly III: ${responseType}`));
 }
+
+/**
+ * Resolves which tool names this config actually enables. Preset-based
+ * (toolPreset/includeAdmin/adminToolAllowlist) takes priority when set;
+ * falls back to the legacy tag-based enableToolTags for the server/local
+ * packages that haven't adopted presets, and finally to DEFAULT_PRESET_TAGS
+ * to preserve prior default behavior when neither is configured.
+ *
+ * This is the single source of truth for BOTH ListTools and CallTool -
+ * previously only ListTools consulted the filter, so a client that already
+ * knew a disabled tool's name (from a prior session, documentation, or a
+ * guess) could invoke it anyway. See getServer() below.
+ */
+const resolveEnabledTools = (serverConfig: McpServerConfig): Set<string> => {
+  if (serverConfig.toolPreset) {
+    return resolveEnabledToolNames(generatedTools, {
+      preset: serverConfig.toolPreset,
+      includeAdmin: serverConfig.includeAdmin ?? false,
+      adminToolAllowlist: serverConfig.adminToolAllowlist,
+    });
+  }
+  const tags = serverConfig.enableToolTags ?? DEFAULT_PRESET_TAGS;
+  if (tags.length === 0) return new Set(generatedTools.map((t) => t.name));
+  return new Set(generatedTools.filter((def) => tags.some((tag) => def.tags.includes(tag))).map((t) => t.name));
+};
 
 /**
  * Get the MCP server instance
@@ -273,16 +332,9 @@ export const getServer = (serverConfig: McpServerConfig): Server => {
       }
       return { tools: [unavailableTool] }
     })
-    server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest): Promise<CallToolResult> => {
-      return {
-        content: [{
-          type: "text", text: JSON.stringify({
-            error: 'Unavailable',
-            message: 'Please check your configuration and restart the server.',
-          }, null, 2)
-        }]
-      };
-    });
+    server.setRequestHandler(CallToolRequestSchema, async (): Promise<CallToolResult> =>
+      errorResult(makeMcpError('AUTHENTICATION_REQUIRED', 'Please check your configuration and restart the server.'))
+    );
     return server;
   }
 
@@ -310,23 +362,16 @@ export const getServer = (serverConfig: McpServerConfig): Server => {
       }
       return { tools: [unauthorizedTool] }
     })
-    server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest): Promise<CallToolResult> => {
-      return {
-        content: [{
-          type: "text", text: JSON.stringify({
-            error: 'Unauthorized',
-            message: 'Please check your configuration and restart the server.',
-          }, null, 2)
-        }]
-      };
-    });
+    server.setRequestHandler(CallToolRequestSchema, async (): Promise<CallToolResult> =>
+      errorResult(makeMcpError('AUTHENTICATION_REQUIRED', 'Please check your configuration and restart the server.'))
+    );
     return server;
   }
 
-  const enableToolTags = serverConfig.enableToolTags ?? DEFAULT_PRESET_TAGS;
+  const enabledToolNames = resolveEnabledTools(serverConfig);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const toolsForClient: Tool[] = generatedTools.filter(def => enableToolTags.length === 0 || enableToolTags.some(tag => def.tags.includes(tag))).map(def => ({
+    const toolsForClient: Tool[] = generatedTools.filter(def => enabledToolNames.has(def.name)).map(def => ({
       name: def.name,
       description: def.description,
       inputSchema: {
@@ -341,8 +386,14 @@ export const getServer = (serverConfig: McpServerConfig): Server => {
     const { name: toolName, arguments: toolArgs } = request.params;
     const toolDefinition = generatedTools.find(tool => tool.name === toolName);
     if (!toolDefinition) {
-      console.error(`Error: Unknown tool requested: ${toolName}`);
-      return { content: [{ type: "text", text: `Error: Unknown tool requested: ${toolName}` }] };
+      return errorResult(makeMcpError('INVALID_TOOL_INPUT', `Unknown tool requested: ${toolName}`));
+    }
+    // Enforced here, not just in ListTools - a tool absent from tool
+    // discovery must also be unreachable by a client that already knows
+    // (or guesses) its name.
+    if (!enabledToolNames.has(toolName)) {
+      serverConfig.logger?.({ stage: 'tool_invocation', toolName, result: 'failure', errorCode: 'TOOL_DISABLED' });
+      return errorResult(makeMcpError('TOOL_DISABLED', `Tool '${toolName}' is disabled under the current preset configuration.`));
     }
     return await executeApiTool(toolName, toolDefinition, toolArgs ?? {}, serverConfig);
   });

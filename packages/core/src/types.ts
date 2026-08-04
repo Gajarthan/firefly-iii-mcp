@@ -10,7 +10,37 @@ export type McpServerConfig = {
   baseUrl: string;
   /** Absent when the caller sends no credential; getServer() degrades to an 'unauthorized' stub tool in that case. */
   pat?: string;
+  /** Legacy tag-based filter; still supported for the server/local packages. Superseded by toolPreset when set. */
   enableToolTags?: string[];
+  /**
+   * Preset-based filter (see tool-risk.ts). Takes priority over enableToolTags
+   * when present. 'safe' and 'advanced' never expose administrative-tier
+   * tools regardless of includeAdmin - that gate only ever widens which
+   * *administrative* tools are reachable, on top of the base preset.
+   */
+  toolPreset?: 'safe' | 'advanced';
+  /** Explicit opt-in to administrative tools; also requires adminToolAllowlist to name them. */
+  includeAdmin?: boolean;
+  /** Exact administrative tool names to enable when includeAdmin is true. */
+  adminToolAllowlist?: string[];
+  /**
+   * Optional hook so a transport package (e.g. cloudflare-worker's log.ts)
+   * can correlate tool_invocation/firefly_api_response stages into its own
+   * structured request log. Deliberately a plain callback rather than a
+   * dependency on any specific logging module - core stays agnostic about
+   * how/where logs end up, and never sees the correlation id itself, only
+   * gets to fire an event for one already bound to it by the caller.
+   */
+  logger?: (event: ToolInvocationLogEvent) => void;
+}
+
+export interface ToolInvocationLogEvent {
+  stage: 'tool_invocation' | 'firefly_api_response';
+  toolName: string;
+  durationMs?: number;
+  upstreamStatus?: number;
+  result: 'success' | 'failure';
+  errorCode?: string;
 }
 
 /** 
