@@ -21,11 +21,27 @@
 			}
 		]
 	},
-  // FIREFLY_III_PAT is a secret: wrangler secret put FIREFLY_III_PAT
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "2f35204836154a9b84e99e347d4cc6e0"
+    }
+  ],
+  // Login is delegated to Firefly III's own OAuth server (Laravel Passport) —
+  // each user signs in with their real Firefly III username/password on
+  // Firefly's own /login page; this worker never sees or stores a password.
+  // FIREFLY_OAUTH_CLIENT_SECRET is a secret: wrangler secret put FIREFLY_OAUTH_CLIENT_SECRET
+  // Client registered on fin.bohar.online via:
+  //   php8.5 artisan passport:client --name='Firefly III MCP' \
+  //     --redirect_uri='https://firefly-iii-mcp.thisanthan02.workers.dev/callback' -n
   "vars": {
     "FIREFLY_III_BASE_URL": "https://fin.bohar.online",
-    // Default preset tags + budgets/available_budgets/piggy_banks so budget and piggy bank tools are exposed
-    "FIREFLY_III_TOOLS": "accounts,bills,categories,tags,transactions,search,summary,budgets,available_budgets,piggy_banks"
+    "FIREFLY_OAUTH_CLIENT_ID": "019fcc52-7aaf-737a-ad55-d86fbe025674",
+    "FIREFLY_OAUTH_REDIRECT_URI": "https://firefly-iii-mcp.thisanthan02.workers.dev/callback",
+    // All 219 tools generated from the Firefly III OpenAPI spec — every tag in ALL_TOOL_TAGS
+    // (packages/core/src/presets.ts), including admin-surface ones (users, user_groups,
+    // webhooks, configuration, preferences), not just personal-finance data.
+    "FIREFLY_III_TOOLS": "about,accounts,attachments,autocomplete,available_budgets,bills,budgets,categories,charts,configuration,currencies,currency_exchange_rates,data,insight,links,object_groups,piggy_banks,preferences,recurrences,rule_groups,rules,search,summary,tags,transactions,user_groups,users,webhooks"
   },
   // "compatibility_flags": [
   //   "nodejs_compat"
