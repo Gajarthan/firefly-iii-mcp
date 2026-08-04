@@ -1,0 +1,53 @@
+name: Deploy (manual)
+
+# Deliberately workflow_dispatch-only, not triggered on push to main. This
+# repo's actual production deploy is a maintainer running
+# `npm run deploy` (packages/cloudflare-worker/scripts/deploy.mjs) by hand -
+# see SECURITY.md. This workflow exists so that CAN be done from GitHub
+# Actions instead when wanted, but it stays inert until a CLOUDFLARE_API_TOKEN
+# repository secret is added; nothing here fires automatically on merge.
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare
+    runs-on: ubuntu-24.04
+    # Gates the deploy on every required check passing for this exact commit -
+    # "production deployment must fail when required tests fail."
+    needs: []
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.14'
+
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck, lint, test
+        run: |
+          bun run typecheck
+          bun run lint
+          bun run test
+
+      - name: Build @firefly-iii-mcp/core
+        run: bun run build --filter=@firefly-iii-mcp/core
+
+      - name: Deploy
+        working-directory: packages/cloudflare-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "CLOUDFLARE_API_TOKEN repository secret is not set - refusing to deploy."
+            echo "Add it under Settings > Secrets and variables > Actions if you want this workflow to actually deploy."
+            exit 1
+          fi
+          npm run deploy
+
+      - name: Report deployed commit
+        run: echo "Deployed git_commit=${GITHUB_SHA::8}"

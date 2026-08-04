@@ -1,0 +1,14 @@
+title = "gitleaks config for firefly-iii-mcp"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secret values that trip generic entropy-based rules"
+regexes = [
+  # FIREFLY_OAUTH_CLIENT_ID in packages/cloudflare-worker/wrangler.jsonc -
+  # a public OAuth client identifier (like a GitHub OAuth App's client_id),
+  # not a secret. The paired FIREFLY_OAUTH_CLIENT_SECRET is never committed;
+  # it's set via `wrangler secret put` and lives only in Cloudflare.
+  '''019fcc52-7aaf-737a-ad55-d86fbe025674''',
+]

@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push on the same branch/PR cancels any CI run still in flight for
+# the previous one - avoids burning minutes on a commit that's already stale.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Typecheck, lint, test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.14' # matches packageManager in package.json
+
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Test (unit, OAuth, tool-preset)
+        run: bun run test
+
+  secret-scan:
+    name: Secret scanning
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks scans full history, not just the diff
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-verify:
+    name: Build verification (Cloudflare Worker)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.14'
+
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Build @firefly-iii-mcp/core (workspace dependency)
+        run: bun run build --filter=@firefly-iii-mcp/core
+        working-directory: .
+
+      - name: Report git commit under verification
+        run: echo "Verifying build for commit ${GITHUB_SHA::8}"
+
+      - name: Bundle the Worker (dry run - no Cloudflare credentials required or used)
+        working-directory: packages/cloudflare-worker
+        run: npx wrangler deploy --dry-run
+
+  # Gate for branch protection: require this single job to pass rather than
+  # naming all three above individually, so adding a future check here
+  # doesn't require updating the branch protection rule too.
+  ci-required:
+    name: CI required checks
+    if: always()
+    needs: [checks, secret-scan, build-verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail if any required job failed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more required checks failed."
+            exit 1
+          fi
