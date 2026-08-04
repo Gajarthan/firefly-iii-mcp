@@ -6,11 +6,14 @@ interface __BaseEnv_Env {
 	FIREFLY_III_BASE_URL: "https://fin.bohar.online";
 	FIREFLY_OAUTH_CLIENT_ID: string;
 	FIREFLY_OAUTH_REDIRECT_URI: string;
-	FIREFLY_III_TOOLS: "accounts,bills,categories,tags,transactions,search,summary,budgets,available_budgets,piggy_banks";
+	ENVIRONMENT: string;
+	MCP_TOOL_PRESET: "safe" | "advanced";
+	MCP_ENABLE_ADMIN_TOOLS: "true" | "false";
+	MCP_ADMIN_TOOL_ALLOWLIST?: string;
 	MCP_OBJECT: DurableObjectNamespace<import("./src/index").FireflyIIIAgent>;
 	// Secrets (wrangler secret put) — not declared in wrangler.jsonc, so `wrangler types` can't see them.
 	FIREFLY_OAUTH_CLIENT_SECRET: string;
-	FIREFLY_III_PRESET?: string;
+	MCP_STATE_SIGNING_KEY: string;
 	// Injected at runtime by OAuthProvider itself (see index.ts) — not a real wrangler binding.
 	OAUTH_PROVIDER: import("@cloudflare/workers-oauth-provider").OAuthHelpers;
 }

@@ -34,14 +34,27 @@
   // Client registered on fin.bohar.online via:
   //   php8.5 artisan passport:client --name='Firefly III MCP' \
   //     --redirect_uri='https://firefly-iii-mcp.thisanthan02.workers.dev/callback' -n
+  //
+  // MCP_STATE_SIGNING_KEY is a secret: wrangler secret put MCP_STATE_SIGNING_KEY
+  // HMAC key for the OAuth `state` param (see src/state.ts) — 32+ random bytes,
+  // e.g. `openssl rand -hex 32`. Not a user credential; rotate freely if ever
+  // suspected leaked, which just invalidates in-flight login attempts.
   "vars": {
     "FIREFLY_III_BASE_URL": "https://fin.bohar.online",
     "FIREFLY_OAUTH_CLIENT_ID": "019fcc52-7aaf-737a-ad55-d86fbe025674",
     "FIREFLY_OAUTH_REDIRECT_URI": "https://firefly-iii-mcp.thisanthan02.workers.dev/callback",
-    // All 219 tools generated from the Firefly III OpenAPI spec — every tag in ALL_TOOL_TAGS
-    // (packages/core/src/presets.ts), including admin-surface ones (users, user_groups,
-    // webhooks, configuration, preferences), not just personal-finance data.
-    "FIREFLY_III_TOOLS": "about,accounts,attachments,autocomplete,available_budgets,bills,budgets,categories,charts,configuration,currencies,currency_exchange_rates,data,insight,links,object_groups,piggy_banks,preferences,recurrences,rule_groups,rules,search,summary,tags,transactions,user_groups,users,webhooks"
+    "ENVIRONMENT": "production",
+    // Default tool surface is the 'safe' preset only (personal-finance read/write,
+    // no deletes, no admin) — see packages/core/src/tool-risk.ts. Set to "advanced"
+    // to also allow deletes and full resource management (bills/budgets/piggy
+    // banks/recurring/attachments/rules). Administrative tools (destroy_data,
+    // user/webhook/currency/configuration admin, bulk destructive ops) are never
+    // included by either value — see MCP_ENABLE_ADMIN_TOOLS below.
+    "MCP_TOOL_PRESET": "safe",
+    // Administrative tools require BOTH this flag AND MCP_ADMIN_TOOL_ALLOWLIST
+    // naming each one explicitly — setting this alone enables nothing.
+    "MCP_ENABLE_ADMIN_TOOLS": "false"
+    // "MCP_ADMIN_TOOL_ALLOWLIST": "store_user,delete_user"
   },
   // "compatibility_flags": [
   //   "nodejs_compat"

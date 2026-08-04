@@ -8,10 +8,11 @@
     "dev": "wrangler dev",
     "build": "wrangler build",
     "clean": "rimraf dist",
-    "deploy": "wrangler deploy --minify",
+    "deploy": "node scripts/deploy.mjs --minify",
     "cf-typegen": "wrangler types",
     "lint": "eslint src/**/*.ts",
-    "test": "echo \"No tests specified\" && exit 0"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.8.3",

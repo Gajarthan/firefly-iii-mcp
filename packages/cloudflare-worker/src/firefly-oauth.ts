@@ -6,6 +6,10 @@
  * a password. What comes back is a Firefly access/refresh token pair scoped
  * to that one Firefly user, which is what every subsequent Firefly III API
  * call is made with.
+ *
+ * Deliberately a pure network client with no logging of its own - callers
+ * (index.ts) wrap each call with log.ts's withStageLogging, keeping this
+ * module trivial to unit test with a mocked fetch.
  */
 
 export interface FireflyTokens {
@@ -27,6 +31,16 @@ interface FireflyTokenResponse {
   token_type: string;
 }
 
+/** Thrown on any non-2xx response from Firefly's OAuth/identity endpoints. Never carries the raw response body - only a bounded, safe description. */
+export class FireflyOAuthError extends Error {
+  readonly status: number;
+  constructor(status: number, safeDescription: string) {
+    super(safeDescription);
+    this.name = 'FireflyOAuthError';
+    this.status = status;
+  }
+}
+
 const tokenEndpoint = (baseUrl: string): string => `${baseUrl}/oauth/token`;
 
 const asFireflyTokens = (json: FireflyTokenResponse): FireflyTokens => ({
@@ -34,6 +48,20 @@ const asFireflyTokens = (json: FireflyTokenResponse): FireflyTokens => ({
   fireflyRefreshToken: json.refresh_token,
   fireflyExpiresAt: Date.now() + json.expires_in * 1000,
 });
+
+// Standard OAuth error response shape: { error, error_description }. Only
+// ever surfaces error/error_description - never the full body, which in
+// principle could echo back parts of the request.
+const safeOAuthErrorDescription = (status: number, bodyText: string): string => {
+  try {
+    const parsed = JSON.parse(bodyText) as { error?: unknown; error_description?: unknown };
+    const code = typeof parsed.error === 'string' ? parsed.error : 'unknown_error';
+    const description = typeof parsed.error_description === 'string' ? parsed.error_description : undefined;
+    return description ? `${code}: ${description}`.slice(0, 300) : code;
+  } catch {
+    return `HTTP ${status}`;
+  }
+};
 
 const postForm = async (url: string, body: Record<string, string>): Promise<FireflyTokenResponse> => {
   const response = await fetch(url, {
@@ -43,7 +71,7 @@ const postForm = async (url: string, body: Record<string, string>): Promise<Fire
   });
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Firefly III token endpoint returned ${response.status}: ${errorText}`);
+    throw new FireflyOAuthError(response.status, safeOAuthErrorDescription(response.status, errorText));
   }
   return await response.json();
 };
@@ -77,7 +105,8 @@ export const fetchFireflyIdentity = async (env: Env, accessToken: string): Promi
     headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
   });
   if (!response.ok) {
-    throw new Error(`Firefly III /about/user returned ${response.status}`);
+    const errorText = await response.text();
+    throw new FireflyOAuthError(response.status, safeOAuthErrorDescription(response.status, errorText));
   }
   const json = await response.json() as { data: { id: string; attributes: { email: string } } };
   return { id: json.data.id, email: json.data.attributes.email };

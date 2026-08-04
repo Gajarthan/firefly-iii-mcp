@@ -1,11 +1,14 @@
-import { Hono } from 'hono'
+import { Hono, Context } from 'hono'
 import { logger } from 'hono/logger'
 import { cors } from 'hono/cors'
 import OAuthProvider, { OAuthError } from '@cloudflare/workers-oauth-provider'
 
 import { FireflyIIIAgent } from './agent'
 import { getMcpServerConfig } from './config'
-import { exchangeFireflyCode, refreshFireflyToken, fetchFireflyIdentity, FireflyTokens } from './firefly-oauth'
+import { exchangeFireflyCode, refreshFireflyToken, fetchFireflyIdentity, FireflyTokens, FireflyOAuthError } from './firefly-oauth'
+import { signState, verifyStateStructure, consumeStateNonce } from './state'
+import { newCorrelationId, hashId, logEvent } from './log'
+import { GIT_COMMIT, BUILD_TIME } from './build-info'
 
 // Requests from browser-based MCP clients (claude.ai, ChatGPT) are the only
 // ones CORS is relevant to at all — non-browser callers ignore it entirely.
@@ -33,6 +36,11 @@ const rewriteCorsOrigin = (req: Request, res: Response): Response => {
   return res
 }
 
+const jsonError = (status: number, code: string, message: string): Response => new Response(
+  JSON.stringify({ code, message, retryable: false }),
+  { status, headers: { 'content-type': 'application/json' } },
+)
+
 // ---- Protected MCP app ----
 // OAuthProvider (below) only ever invokes this once it has verified the
 // request carries a valid access token issued through our own /authorize →
@@ -51,34 +59,43 @@ apiApp.use('*', cors({ origin: ALLOWED_ORIGINS }))
 const grantProps = (c: { executionCtx: unknown }): Partial<FireflyTokens> =>
   (c.executionCtx as { props?: Partial<FireflyTokens> } | undefined)?.props ?? {}
 
-const unauthorized = (): Response => new Response(
-  JSON.stringify({ error: 'Unauthorized', message: 'No Firefly III session is associated with this token.' }),
-  { status: 401, headers: { 'content-type': 'application/json' } },
-)
+const handleMcpRoute = (transport: 'mcp' | 'sse') => async (c: Context<{ Bindings: Env }>) => {
+  const correlationId = newCorrelationId()
+  const props = grantProps(c)
+  const config = getMcpServerConfig(c.env, props.fireflyAccessToken)
+  if (!config) {
+    logEvent({ correlationId, stage: 'mcp_connection', result: 'failure', errorCode: 'AUTHENTICATION_REQUIRED' })
+    return jsonError(401, 'AUTHENTICATION_REQUIRED', 'No Firefly III session is associated with this token.')
+  }
 
-apiApp.use('/mcp', async (c) => {
-  const config = getMcpServerConfig(c.env, grantProps(c).fireflyAccessToken)
-  if (!config) return unauthorized()
+  const fireflyUserIdHash = props.fireflyAccessToken ? await hashId(props.fireflyAccessToken) : undefined
+  // Binds tool_invocation/firefly_api_response log lines from inside core's
+  // executeApiTool back to this request's correlationId, without core ever
+  // needing to know what a correlationId is - see McpServerConfig.logger.
+  const configWithLogger = {
+    ...config,
+    logger: (event: Parameters<NonNullable<typeof config.logger>>[0]) =>
+      logEvent({ correlationId, fireflyUserIdHash, ...event }),
+  }
+
   // `as any`: Hono's ExecutionContext type and the ambient global one (which
   // McpAgent.serve()/serveSSE() expect) have drifted apart on fields like
   // `tracing` that neither this glue code nor the agents SDK actually reads;
   // both are the same object at runtime.
-  const agentContext = { ...c.executionCtx, props: config } as any
-  const mcp = await FireflyIIIAgent.serve('/mcp').fetch(c.req.raw, c.env, agentContext)
+  const agentContext = { ...c.executionCtx, props: configWithLogger } as any
+  const start = Date.now()
+  const mcp = transport === 'mcp'
+    ? await FireflyIIIAgent.serve('/mcp').fetch(c.req.raw, c.env, agentContext)
+    : await FireflyIIIAgent.serveSSE('/sse').fetch(c.req.raw, c.env, agentContext)
+  logEvent({
+    correlationId, fireflyUserIdHash, stage: 'mcp_connection',
+    durationMs: Date.now() - start, result: mcp.ok ? 'success' : 'failure',
+  })
   return rewriteCorsOrigin(c.req.raw, mcp)
-})
+}
 
-apiApp.use('/sse*', async (c) => {
-  const config = getMcpServerConfig(c.env, grantProps(c).fireflyAccessToken)
-  if (!config) return unauthorized()
-  // `as any`: Hono's ExecutionContext type and the ambient global one (which
-  // McpAgent.serve()/serveSSE() expect) have drifted apart on fields like
-  // `tracing` that neither this glue code nor the agents SDK actually reads;
-  // both are the same object at runtime.
-  const agentContext = { ...c.executionCtx, props: config } as any
-  const mcp = await FireflyIIIAgent.serveSSE('/sse').fetch(c.req.raw, c.env, agentContext)
-  return rewriteCorsOrigin(c.req.raw, mcp)
-})
+apiApp.use('/mcp', handleMcpRoute('mcp'))
+apiApp.use('/sse*', handleMcpRoute('sse'))
 
 // ---- Delegated login: Firefly III is the identity provider ----
 // /authorize doesn't render a login form itself — it hands the browser off
@@ -88,31 +105,40 @@ apiApp.use('/sse*', async (c) => {
 // access/refresh token pair scoped to that one Firefly user.
 //
 // The original MCP client's AuthRequest (oauthReqInfo) has to survive the
-// round trip through Firefly, so it travels as the `state` param on the
-// Firefly leg and is decoded back out of it in /callback. This mirrors
-// Cloudflare's own upstream-OAuth demos (e.g. remote-mcp-github-oauth) —
-// oauthReqInfo carries no secret, and Firefly only ever redirects back to
-// our exact registered redirect_uri with a `code` it minted itself, so
-// nothing here needs a separate CSRF nonce on top of it.
-
-const base64UrlEncode = (obj: unknown): string =>
-  btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-
-const base64UrlDecode = (s: string): unknown =>
-  JSON.parse(atob(s.replace(/-/g, '+').replace(/_/g, '/')))
+// round trip through Firefly, so it travels as a signed, expiring, single-
+// use `state` param on the Firefly leg and is verified + decoded back out
+// of it in /callback — see state.ts.
 
 const defaultHandler = {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
+    const correlationId = newCorrelationId()
+
+    if (url.pathname === '/health' && request.method === 'GET') {
+      return new Response(JSON.stringify({ status: 'ok' }), { headers: { 'content-type': 'application/json' } })
+    }
+
+    if (url.pathname === '/version' && request.method === 'GET') {
+      return new Response(JSON.stringify({
+        service: 'gajarthan-finance-mcp',
+        git_commit: GIT_COMMIT,
+        build_time: BUILD_TIME,
+        environment: env.ENVIRONMENT ?? 'unknown',
+      }), { headers: { 'content-type': 'application/json' } })
+    }
 
     if (url.pathname === '/authorize' && request.method === 'GET') {
       const oauthReqInfo = await env.OAUTH_PROVIDER.parseAuthRequest(request)
+      const state = await signState(env.MCP_STATE_SIGNING_KEY, oauthReqInfo, env.FIREFLY_OAUTH_REDIRECT_URI)
+
       const fireflyAuthorizeUrl = new URL(`${env.FIREFLY_III_BASE_URL}/oauth/authorize`)
       fireflyAuthorizeUrl.searchParams.set('client_id', env.FIREFLY_OAUTH_CLIENT_ID)
       fireflyAuthorizeUrl.searchParams.set('redirect_uri', env.FIREFLY_OAUTH_REDIRECT_URI)
       fireflyAuthorizeUrl.searchParams.set('response_type', 'code')
       fireflyAuthorizeUrl.searchParams.set('scope', '')
-      fireflyAuthorizeUrl.searchParams.set('state', base64UrlEncode(oauthReqInfo))
+      fireflyAuthorizeUrl.searchParams.set('state', state)
+
+      logEvent({ correlationId, stage: 'authorize', result: 'success' })
       return Response.redirect(fireflyAuthorizeUrl.toString(), 302)
     }
 
@@ -120,30 +146,42 @@ const defaultHandler = {
       const code = url.searchParams.get('code')
       const state = url.searchParams.get('state')
       if (!code || !state) {
-        return new Response('Bad request: missing code or state', { status: 400 })
+        logEvent({ correlationId, stage: 'callback', result: 'failure', errorCode: 'AUTHORIZATION_FAILED' })
+        return jsonError(400, 'AUTHORIZATION_FAILED', 'Missing code or state.')
       }
 
-      let oauthReqInfo: Awaited<ReturnType<typeof env.OAUTH_PROVIDER.parseAuthRequest>>
-      try {
-        oauthReqInfo = base64UrlDecode(state) as typeof oauthReqInfo
-      } catch {
-        return new Response('Bad request: invalid state', { status: 400 })
+      const validation = await verifyStateStructure(env.MCP_STATE_SIGNING_KEY, state, env.FIREFLY_OAUTH_REDIRECT_URI)
+      if (!validation.ok) {
+        logEvent({ correlationId, stage: 'callback', result: 'failure', errorCode: `AUTHORIZATION_FAILED:${validation.error}` })
+        return jsonError(400, 'AUTHORIZATION_FAILED', 'The sign-in link is invalid or has expired. Please try connecting again.')
       }
+      const { payload } = validation
+      const remainingTtl = payload.exp - Math.floor(Date.now() / 1000)
+      const nonceOk = await consumeStateNonce(env.OAUTH_KV, payload.nonce, remainingTtl)
+      if (!nonceOk) {
+        logEvent({ correlationId, stage: 'callback', result: 'failure', errorCode: 'AUTHORIZATION_FAILED:replayed' })
+        return jsonError(400, 'AUTHORIZATION_FAILED', 'This sign-in link has already been used. Please try connecting again.')
+      }
+      const oauthReqInfo = payload.request as Awaited<ReturnType<typeof env.OAUTH_PROVIDER.parseAuthRequest>>
 
-      let tokens
+      let tokens: FireflyTokens
       try {
         tokens = await exchangeFireflyCode(env, code)
+        logEvent({ correlationId, stage: 'token_exchange', result: 'success' })
       } catch (error) {
-        console.error('Firefly III code exchange failed:', error)
-        return new Response('Firefly III sign-in failed. Please try again.', { status: 502 })
+        const status = error instanceof FireflyOAuthError ? error.status : undefined
+        logEvent({ correlationId, stage: 'token_exchange', result: 'failure', upstreamStatus: status, errorCode: 'AUTHORIZATION_FAILED' })
+        return jsonError(502, 'AUTHORIZATION_FAILED', 'Firefly III sign-in failed. Please try again.')
       }
 
       let identity
       try {
         identity = await fetchFireflyIdentity(env, tokens.fireflyAccessToken)
+        logEvent({ correlationId, stage: 'identity_lookup', result: 'success', fireflyUserIdHash: await hashId(identity.id) })
       } catch (error) {
-        console.error('Firefly III identity lookup failed:', error)
-        return new Response('Firefly III sign-in failed. Please try again.', { status: 502 })
+        const status = error instanceof FireflyOAuthError ? error.status : undefined
+        logEvent({ correlationId, stage: 'identity_lookup', result: 'failure', upstreamStatus: status, errorCode: 'AUTHORIZATION_FAILED' })
+        return jsonError(502, 'AUTHORIZATION_FAILED', 'Firefly III sign-in failed. Please try again.')
       }
 
       const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
@@ -153,9 +191,13 @@ const defaultHandler = {
         scope: oauthReqInfo.scope,
         // Decrypted back into ctx.props on every /mcp and /sse call (see
         // grantProps above), and handed to tokenExchangeCallback below
-        // whenever this grant's MCP-issued access token is refreshed.
+        // whenever this grant's MCP-issued access token is refreshed. Two
+        // different Firefly users (different userId here) always get
+        // separate grants with separate encrypted props - one user's tokens
+        // are never reachable from another's session.
         props: tokens,
       })
+      logEvent({ correlationId, stage: 'grant_creation', result: 'success', fireflyUserIdHash: await hashId(identity.id) })
       return Response.redirect(redirectTo, 302)
     }
 
@@ -188,11 +230,14 @@ const buildProvider = (env: Env) => new OAuthProvider({
     // Firefly access tokens are long-lived by default; skip the upstream
     // round-trip unless this one is actually close to expiring.
     if (props.fireflyExpiresAt && props.fireflyExpiresAt - Date.now() > 5 * 60 * 1000) return
+    const correlationId = newCorrelationId()
     try {
       const refreshed = await refreshFireflyToken(env, props.fireflyRefreshToken)
+      logEvent({ correlationId, stage: 'token_refresh', result: 'success' })
       return { newProps: refreshed }
     } catch (error) {
-      console.error('Firefly III token refresh failed:', error)
+      const status = error instanceof FireflyOAuthError ? error.status : undefined
+      logEvent({ correlationId, stage: 'token_refresh', result: 'failure', upstreamStatus: status, errorCode: 'TOKEN_REFRESH_FAILED' })
       throw new OAuthError('invalid_grant', { description: 'Firefly III session expired; please sign in again.' })
     }
   },
