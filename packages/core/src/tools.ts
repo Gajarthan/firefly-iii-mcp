@@ -4275,9 +4275,8 @@ export const generatedTools: McpToolDefinition[] = [
           "description": "The ID of the budget. The budget limit MUST be associated to the budget ID."
         },
         "limitId": {
-          "type": "integer",
-          "minimum": 1,
-          "example": 1,
+          "type": "string",
+          "example": "123",
           "description": "The ID of the budget limit. The budget limit MUST be associated to the budget ID."
         }
       },

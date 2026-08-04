@@ -12,6 +12,72 @@ import { Schema, Validator } from "@cfworker/json-schema";
 import { openapiSchemaToJsonSchema } from "@openapi-contrib/openapi-schema-to-json-schema";
 import { DEFAULT_PRESET_TAGS } from "./presets.js";
 
+/**
+ * Build the JSON Schema describing a tool's result.
+ *
+ * Derived from the tool definition at list time rather than baked into the
+ * generated tools.ts, so regenerating that file from the OpenAPI spec cannot
+ * silently drop it.
+ *
+ * Deliberately permissive: every object allows additional properties and
+ * nothing is marked required. A declared outputSchema obliges us to return
+ * matching structuredContent on every success, so a schema that is too strict
+ * turns a working call into a client-side validation error. These describe the
+ * Firefly III v1 envelope without promising more than the API guarantees.
+ */
+export const buildOutputSchema = (definition: McpToolDefinition): { type: 'object';[k: string]: unknown } => {
+  // All delete_* tools answer 204 with an empty body; see executeApiTool.
+  if (definition.method.toLowerCase() === 'delete') {
+    return {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean', description: 'True when Firefly III accepted the deletion.' },
+        status: { type: 'number', description: 'HTTP status returned by Firefly III (204 on success).' },
+      },
+      additionalProperties: false,
+    };
+  }
+
+  // Not an envelope: a map of summary keys ("balance-in-LKR", "spent-in-LKR", ...)
+  // onto summary entries.
+  if (definition.name === 'get_basic_summary') {
+    return {
+      type: 'object',
+      description: 'Map of summary key to summary entry.',
+      additionalProperties: { type: 'object', additionalProperties: true },
+    };
+  }
+
+  const isCollection = /^(list_|search_)/.test(definition.name);
+  return {
+    type: 'object',
+    properties: {
+      data: isCollection
+        ? {
+          type: 'array',
+          description: 'The requested resources.',
+          items: { type: 'object', additionalProperties: true },
+        }
+        : {
+          type: 'object',
+          description: 'The requested resource.',
+          additionalProperties: true,
+        },
+      meta: {
+        type: 'object',
+        description: 'Response metadata, including pagination for collections.',
+        additionalProperties: true,
+      },
+      links: {
+        type: 'object',
+        description: 'Navigation links for the resource or collection.',
+        additionalProperties: true,
+      },
+    },
+    additionalProperties: true,
+  };
+};
+
 export const executeApiTool = async (
   toolName: string,
   definition: McpToolDefinition,
@@ -30,6 +96,7 @@ export const executeApiTool = async (
     } else {
       const errors = validatedResult.errors;
       return {
+        isError: true,
         content: [{
           type: 'text', text: JSON.stringify({
             message: `Invalid arguments for tool '${toolName}'`,
@@ -40,6 +107,7 @@ export const executeApiTool = async (
     }
   } catch (error: unknown) {
     return {
+      isError: true,
       content: [{
         type: 'text', text: JSON.stringify({
           message: `Error validating arguments for tool '${toolName}'`,
@@ -104,7 +172,10 @@ export const executeApiTool = async (
 
   if (!response.ok) {
     const errorText = await response.text();
+    // isError marks this as a failed call, which also exempts it from
+    // outputSchema validation - error payloads do not match the success shape.
     return {
+      isError: true,
       content: [{
         type: 'text', text: JSON.stringify({
           message: `Error executing tool '${toolName}': ${response.status} ${response.statusText}`,
@@ -115,24 +186,46 @@ export const executeApiTool = async (
   }
 
   const responseType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
-  if (responseType?.includes('json')) {
+
+  // 204 No Content, or a body with no content-type: every delete_* tool lands
+  // here. Previously this fell through to the "unsupported response type"
+  // branch and reported a successful delete as an error.
+  if (response.status === 204 || !responseType) {
+    const outcome = { success: true, status: response.status };
+    return {
+      content: [{
+        type: 'text', text: JSON.stringify(outcome, null, 2)
+      }],
+      structuredContent: outcome,
+    }
+  }
+
+  if (responseType.includes('json')) {
     const responseData = await response.json();
+    // structuredContent must be a JSON object; wrap anything else so the
+    // result still satisfies the declared outputSchema.
+    const structuredContent = (typeof responseData === 'object' && responseData !== null && !Array.isArray(responseData))
+      ? responseData as Record<string, unknown>
+      : { data: responseData };
     return {
       content: [{
         type: 'text', text: JSON.stringify(responseData, null, 2)
-      }]
+      }],
+      structuredContent,
     }
-  } else if (responseType?.includes('text')) {
+  } else if (responseType.includes('text')) {
     const responseText = await response.text();
     return {
       content: [{
         type: 'text', text: responseText
-      }]
+      }],
+      structuredContent: { data: responseText },
     }
   }
 
   // Default to text response for unsupported types
   return {
+    isError: true,
     content: [{
       type: 'text', text: JSON.stringify({
         error: `Unsupported response type: ${responseType}`,
@@ -151,7 +244,7 @@ export const getServer = (serverConfig: McpServerConfig): Server => {
   const server = new Server(
     {
       name: 'Firefly III MCP Agent',
-      version: '1.3.0',
+      version: '1.4.0',
     }, {
     capabilities: { tools: {} }
   })
@@ -240,6 +333,7 @@ export const getServer = (serverConfig: McpServerConfig): Server => {
         ...def.inputSchema,
         type: 'object',
       },
+      outputSchema: buildOutputSchema(def),
     }));
     return { tools: toolsForClient };
   });

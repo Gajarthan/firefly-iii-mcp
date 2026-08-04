@@ -8,7 +8,8 @@ import type { OpenAPIV3 } from 'openapi-types';
  */
 export type McpServerConfig = {
   baseUrl: string;
-  pat: string;
+  /** Absent when the caller sends no credential; getServer() degrades to an 'unauthorized' stub tool in that case. */
+  pat?: string;
   enableToolTags?: string[];
 }
 
