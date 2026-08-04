@@ -69,20 +69,20 @@ const handleMcpRoute = (transport: 'mcp' | 'sse') => async (c: Context<{ Binding
   }
 
   const fireflyUserIdHash = props.fireflyAccessToken ? await hashId(props.fireflyAccessToken) : undefined
-  // Binds tool_invocation/firefly_api_response log lines from inside core's
-  // executeApiTool back to this request's correlationId, without core ever
-  // needing to know what a correlationId is - see McpServerConfig.logger.
-  const configWithLogger = {
-    ...config,
-    logger: (event: Parameters<NonNullable<typeof config.logger>>[0]) =>
-      logEvent({ correlationId, fireflyUserIdHash, ...event }),
-  }
+  // McpAgent hands `props` to the FireflyIIIAgent Durable Object across an
+  // RPC boundary (structured clone) - it must stay plain, serializable data.
+  // A function here (an earlier version tried passing a logger callback)
+  // fails with "DataCloneError: RpcStub cannot be serialized in this
+  // context" on every real tool call. correlationId is a plain string;
+  // core's executeApiTool logs tool_invocation/firefly_api_response itself
+  // (see server.ts's logToolEvent) keyed off it, with no callback involved.
+  const configWithCorrelation = { ...config, correlationId }
 
   // `as any`: Hono's ExecutionContext type and the ambient global one (which
   // McpAgent.serve()/serveSSE() expect) have drifted apart on fields like
   // `tracing` that neither this glue code nor the agents SDK actually reads;
   // both are the same object at runtime.
-  const agentContext = { ...c.executionCtx, props: configWithLogger } as any
+  const agentContext = { ...c.executionCtx, props: configWithCorrelation } as any
   const start = Date.now()
   const mcp = transport === 'mcp'
     ? await FireflyIIIAgent.serve('/mcp').fetch(c.req.raw, c.env, agentContext)

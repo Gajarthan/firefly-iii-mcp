@@ -24,14 +24,16 @@ export type McpServerConfig = {
   /** Exact administrative tool names to enable when includeAdmin is true. */
   adminToolAllowlist?: string[];
   /**
-   * Optional hook so a transport package (e.g. cloudflare-worker's log.ts)
-   * can correlate tool_invocation/firefly_api_response stages into its own
-   * structured request log. Deliberately a plain callback rather than a
-   * dependency on any specific logging module - core stays agnostic about
-   * how/where logs end up, and never sees the correlation id itself, only
-   * gets to fire an event for one already bound to it by the caller.
+   * Correlation id for structured logging of tool_invocation/
+   * firefly_api_response stages (see server.ts's logToolEvent). A plain
+   * string, not a callback: McpServerConfig for the cloudflare-worker
+   * package is passed as Durable Object props (see agent.ts), which cross
+   * an RPC boundary via structured clone - functions cannot survive that
+   * (fails with "DataCloneError: RpcStub cannot be serialized in this
+   * context"), so logging here can only ever be done with plain data, never
+   * a callback the caller wanted to have invoked from inside the DO.
    */
-  logger?: (event: ToolInvocationLogEvent) => void;
+  correlationId?: string;
 }
 
 export interface ToolInvocationLogEvent {

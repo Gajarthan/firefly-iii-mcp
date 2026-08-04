@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { getServer } from './server.js';
-import type { McpServerConfig, ToolInvocationLogEvent } from './types.js';
+import type { McpServerConfig } from './types.js';
 
 // The SDK's Server/Protocol class stores registered handlers in a Map keyed
 // by JSON-RPC method name (see node_modules/@modelcontextprotocol/sdk/dist/
@@ -151,23 +151,46 @@ describe('getServer: upstream error handling', () => {
   });
 });
 
-describe('getServer: structured logging hook', () => {
-  test('logger receives a tool_invocation event with toolName and result for both success and failure', async () => {
+describe('getServer: structured logging via correlationId', () => {
+  // correlationId is a plain string (not a callback) specifically because
+  // McpServerConfig crosses a Durable Object RPC boundary on the deployed
+  // worker - see McpServerConfig.correlationId's doc comment. These tests
+  // capture console.log output rather than passing in a function, since a
+  // function is exactly what must NOT be relied on here.
+  let originalConsoleLog: typeof console.log;
+  let capturedLines: string[];
+  beforeEach(() => {
+    capturedLines = [];
+    originalConsoleLog = console.log;
+    console.log = mock((line: string) => { capturedLines.push(line); });
+  });
+  afterEach(() => { console.log = originalConsoleLog; });
+
+  const parsedLogEvents = () => capturedLines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+
+  test('a tool_invocation event with toolName and result is logged for both success and failure', async () => {
     globalThis.fetch = mock(async () => jsonResponse({ data: {} })) as unknown as typeof fetch;
-    const events: Array<{ stage: string; toolName: string; result: string }> = [];
-    const server = getServer({ ...BASE_CONFIG, logger: (e: ToolInvocationLogEvent) => events.push(e as any) });
+    const server = getServer({ ...BASE_CONFIG, correlationId: 'test-correlation-1' });
 
     await callTool(server, 'get_account', { id: '1' });
-    const invocationEvents = events.filter((e) => e.stage === 'tool_invocation');
+    const invocationEvents = parsedLogEvents().filter((e) => e.stage === 'tool_invocation');
     expect(invocationEvents.length).toBe(1);
     expect(invocationEvents[0].toolName).toBe('get_account');
     expect(invocationEvents[0].result).toBe('success');
+    expect(invocationEvents[0].correlationId).toBe('test-correlation-1');
   });
 
-  test('logger fires for a TOOL_DISABLED rejection too, so blocked attempts are still observable', async () => {
-    const events: Array<{ stage: string; errorCode?: string }> = [];
-    const server = getServer({ ...BASE_CONFIG, logger: (e: ToolInvocationLogEvent) => events.push(e as any) });
+  test('a TOOL_DISABLED rejection is logged too, so blocked attempts are still observable', async () => {
+    const server = getServer({ ...BASE_CONFIG, correlationId: 'test-correlation-2' });
     await callTool(server, 'delete_transaction', { id: '1' });
+    const events = parsedLogEvents();
     expect(events.some((e) => e.stage === 'tool_invocation' && e.errorCode === 'TOOL_DISABLED')).toBe(true);
+  });
+
+  test('no correlationId set -> nothing is logged (server/local packages opt out by omission)', async () => {
+    globalThis.fetch = mock(async () => jsonResponse({ data: {} })) as unknown as typeof fetch;
+    const server = getServer(BASE_CONFIG); // no correlationId
+    await callTool(server, 'get_account', { id: '1' });
+    expect(capturedLines.length).toBe(0);
   });
 });

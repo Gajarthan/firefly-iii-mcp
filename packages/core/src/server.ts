@@ -85,6 +85,23 @@ const errorResult = (error: McpErrorPayload): CallToolResult => ({
   content: [{ type: 'text', text: JSON.stringify(error, null, 2) }],
 });
 
+/**
+ * Structured log line for the tool_invocation/firefly_api_response stages,
+ * emitted directly via console.log rather than through a caller-supplied
+ * callback - see McpServerConfig.correlationId for why (functions can't
+ * cross the Durable Object RPC boundary this config is passed through on
+ * the cloudflare-worker deployment). No-ops when correlationId is absent
+ * (e.g. the server/local packages, which don't set one).
+ */
+const logToolEvent = (
+  correlationId: string | undefined,
+  stage: 'tool_invocation' | 'firefly_api_response',
+  fields: { toolName: string; durationMs?: number; upstreamStatus?: number; result: 'success' | 'failure'; errorCode?: string },
+): void => {
+  if (!correlationId) return;
+  console.log(JSON.stringify({ ts: new Date().toISOString(), correlationId, stage, ...fields }));
+};
+
 const extractErrorCode = (result: CallToolResult): string | undefined => {
   try {
     const first = result.content?.[0];
@@ -105,8 +122,7 @@ export const executeApiTool = async (
 ): Promise<CallToolResult> => {
   const startedAt = Date.now();
   const result = await executeApiToolInner(toolName, definition, toolArgs, serverConfig);
-  serverConfig.logger?.({
-    stage: 'tool_invocation',
+  logToolEvent(serverConfig.correlationId, 'tool_invocation', {
     toolName,
     durationMs: Date.now() - startedAt,
     result: result.isError ? 'failure' : 'success',
@@ -199,8 +215,8 @@ const executeApiToolInner = async (
       body: requestBodyData ? JSON.stringify(requestBodyData) : undefined,
     });
   } catch {
-    serverConfig.logger?.({
-      stage: 'firefly_api_response', toolName, durationMs: Date.now() - upstreamStartedAt,
+    logToolEvent(serverConfig.correlationId, 'firefly_api_response', {
+      toolName, durationMs: Date.now() - upstreamStartedAt,
       result: 'failure', errorCode: 'UPSTREAM_UNAVAILABLE',
     });
     // Network failure reaching Firefly III itself (DNS, TLS, connection
@@ -212,8 +228,8 @@ const executeApiToolInner = async (
   if (!response.ok) {
     const errorText = await response.text();
     const mapped = upstreamError(response.status, errorText);
-    serverConfig.logger?.({
-      stage: 'firefly_api_response', toolName, durationMs: Date.now() - upstreamStartedAt,
+    logToolEvent(serverConfig.correlationId, 'firefly_api_response', {
+      toolName, durationMs: Date.now() - upstreamStartedAt,
       upstreamStatus: response.status, result: 'failure', errorCode: mapped.code,
     });
     console.debug(`Tool "${toolName}" upstream error: ${response.status}`);
@@ -222,8 +238,8 @@ const executeApiToolInner = async (
     return errorResult(mapped);
   }
 
-  serverConfig.logger?.({
-    stage: 'firefly_api_response', toolName, durationMs: Date.now() - upstreamStartedAt,
+  logToolEvent(serverConfig.correlationId, 'firefly_api_response', {
+    toolName, durationMs: Date.now() - upstreamStartedAt,
     upstreamStatus: response.status, result: 'success',
   });
 
@@ -392,7 +408,7 @@ export const getServer = (serverConfig: McpServerConfig): Server => {
     // discovery must also be unreachable by a client that already knows
     // (or guesses) its name.
     if (!enabledToolNames.has(toolName)) {
-      serverConfig.logger?.({ stage: 'tool_invocation', toolName, result: 'failure', errorCode: 'TOOL_DISABLED' });
+      logToolEvent(serverConfig.correlationId, 'tool_invocation', { toolName, result: 'failure', errorCode: 'TOOL_DISABLED' });
       return errorResult(makeMcpError('TOOL_DISABLED', `Tool '${toolName}' is disabled under the current preset configuration.`));
     }
     return await executeApiTool(toolName, toolDefinition, toolArgs ?? {}, serverConfig);
